@@ -95,3 +95,219 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+import os
+import gzip
+import json
+import pickle
+import time
+import numpy as np
+import pandas as pd
+from sklearn.svm import SVC
+from sklearn.decomposition import PCA
+from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import GridSearchCV, train_test_split
+from sklearn.metrics import (
+    precision_score,
+    recall_score,
+    f1_score,
+    balanced_accuracy_score,
+    confusion_matrix,
+)
+
+def load_datasets(train_path='files/input/train_data.csv.zip',
+                  test_path='files/input/test_data.csv.zip'):
+    """Carga los datasets de entrenamiento y prueba."""
+    train_df = pd.read_csv(train_path, index_col=False)
+    test_df = pd.read_csv(test_path, index_col=False)
+    return train_df, test_df
+
+
+def clean_data(df: pd.DataFrame) -> pd.DataFrame:
+    """Realiza limpieza y preprocesamiento básico en el dataset."""
+    df = df.copy()
+    df.rename(columns={"default payment next month": "default"}, inplace=True)
+    df.drop(columns=["ID"], inplace=True)
+    df = df[df["MARRIAGE"] != 0]
+    df = df[df["EDUCATION"] != 0]
+    df["EDUCATION"] = df["EDUCATION"].apply(lambda x: 4 if x > 4 else x)
+
+    df.dropna(inplace=True)
+    df.drop_duplicates(inplace=True)
+
+    return df
+
+def split_features_and_target(train_df, test_df, target_col="default"):
+    """Separa variables independientes y objetivo en train y test."""
+    x_train = train_df.drop(columns=[target_col])
+    y_train = train_df[target_col]
+    x_test = test_df.drop(columns=[target_col])
+    y_test = test_df[target_col]
+    return x_train, y_train, x_test, y_test
+
+
+def create_train_test_split(x, y, test_size=0.25, random_state=42):
+    """Divide el conjunto de datos en entrenamiento y validación."""
+    x_train, x_val, y_train, y_val = train_test_split(
+        x, y, test_size=test_size, random_state=random_state
+    )
+
+    print("Tamaños:")
+    print("x_train:", x_train.shape)
+    print("y_train:", y_train.shape)
+    print("x_val:", x_val.shape)
+    print("y_val:", y_val.shape)
+
+    return x_train, x_val, y_train, y_val
+
+
+def build_pipeline(categorical_features, numeric_features, estimator):
+    """Crea un pipeline con preprocesamiento, PCA, selección de características y clasificador."""
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("categorical", OneHotEncoder(handle_unknown="ignore"), categorical_features),
+            ("numeric", StandardScaler(), numeric_features),
+        ],
+        remainder='passthrough'
+    )
+
+    pipeline = Pipeline(steps=[
+        ('preprocessing', preprocessor),
+        ('pca', PCA()),
+        ('feature_selection', SelectKBest(score_func=f_classif)),
+        ('classifier', estimator)
+    ])
+
+    return pipeline
+
+
+def perform_grid_search(pipeline, param_grid, cv, scoring, x_train, y_train):
+    """Ejecuta una búsqueda de grilla para optimizar hiperparámetros."""
+    grid_search = GridSearchCV(
+        estimator=pipeline,
+        param_grid=param_grid,
+        cv=cv,
+        scoring=scoring,
+        n_jobs=-1,
+        verbose=1
+    )
+    grid_search.fit(x_train, y_train)
+    return grid_search
+
+
+def save_model(model, output_path="files/models/model.pkl.gz"):
+    """Guarda el modelo entrenado en un archivo comprimido."""
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with gzip.open(output_path, "wb") as f:
+        pickle.dump(model, f)
+    print(f"Modelo guardado en: {output_path}")
+
+
+def load_model(model_path):
+    """Carga un modelo almacenado desde un archivo comprimido."""
+    if not os.path.exists(model_path):
+        return None
+    with gzip.open(model_path, "rb") as f:
+        return pickle.load(f)
+
+
+def evaluate_model(model, x_train, y_train, x_test, y_test):
+    """Calcula métricas de desempeño y matrices de confusión."""
+    y_train_pred = model.predict(x_train)
+    y_test_pred = model.predict(x_test)
+
+    cm_train = confusion_matrix(y_train, y_train_pred)
+    cm_test = confusion_matrix(y_test, y_test_pred)
+
+    metrics = [
+        {
+            'type': 'metrics',
+            'dataset': 'train',
+            'precision': round(precision_score(y_train, y_train_pred, zero_division=0), 4),
+            'balanced_accuracy': round(balanced_accuracy_score(y_train, y_train_pred), 4),
+            'recall': round(recall_score(y_train, y_train_pred, zero_division=0), 4),
+            'f1_score': round(f1_score(y_train, y_train_pred, zero_division=0), 4)
+        },
+        {
+            'type': 'metrics',
+            'dataset': 'test',
+            'precision': round(precision_score(y_test, y_test_pred, zero_division=0), 4),
+            'balanced_accuracy': round(balanced_accuracy_score(y_test, y_test_pred), 4),
+            'recall': round(recall_score(y_test, y_test_pred, zero_division=0), 4),
+            'f1_score': round(f1_score(y_test, y_test_pred, zero_division=0), 4)
+        },
+        {
+            'type': 'cm_matrix',
+            'dataset': 'train',
+            'true_0': {'predicted_0': int(cm_train[0, 0]), 'predicted_1': int(cm_train[0, 1])},
+            'true_1': {'predicted_0': int(cm_train[1, 0]), 'predicted_1': int(cm_train[1, 1])}
+        },
+        {
+            'type': 'cm_matrix',
+            'dataset': 'test',
+            'true_0': {'predicted_0': int(cm_test[0, 0]), 'predicted_1': int(cm_test[0, 1])},
+            'true_1': {'predicted_0': int(cm_test[1, 0]), 'predicted_1': int(cm_test[1, 1])}
+        }
+    ]
+    return metrics
+
+
+def save_metrics_to_json(metrics, output_path="files/output/metrics.json"):
+    """Guarda las métricas calculadas en formato JSON."""
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        for metric in metrics:
+            f.write(json.dumps(metric, ensure_ascii=False))
+            f.write('\n')
+
+
+def main():
+    start_time = time.time()
+
+    # Cargar y limpiar datos
+    train_df, test_df = load_datasets()
+    train_df = clean_data(train_df)
+    test_df = clean_data(test_df)
+
+    x_train, y_train, x_test, y_test = split_features_and_target(train_df, test_df, "default")
+
+    categorical_features = ["EDUCATION", "MARRIAGE", "SEX"]
+    numeric_features = list(set(x_train.columns) - set(categorical_features))
+
+    # Modelo base
+    estimator = SVC(random_state=42)
+    pipeline = build_pipeline(categorical_features, numeric_features, estimator)
+
+    # Espacio de búsqueda
+    param_grid = {
+        "pca__n_components": [20, 21],
+        "feature_selection__k": range(1, len(x_train.columns) + 1),
+        "classifier__C": [0.8],
+        "classifier__kernel": ["rbf"],
+        "classifier__gamma": [0.099]
+    }
+
+    # Entrenar modelo
+    model = perform_grid_search(
+        pipeline,
+        param_grid,
+        cv=10,
+        scoring="balanced_accuracy",
+        x_train=x_train,
+        y_train=y_train
+    )
+
+    # Guardar modelo y métricas
+    save_model(model)
+    metrics = evaluate_model(model, x_train, y_train, x_test, y_test)
+    save_metrics_to_json(metrics)
+
+    # Tiempo total
+    duration = (time.time() - start_time) / 60
+    print(f"Tiempo de ejecución: {duration:.2f} minutos")
+
+
+if __name__ == "__main__":
+    main()
